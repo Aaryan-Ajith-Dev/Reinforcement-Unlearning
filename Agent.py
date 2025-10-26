@@ -1,3 +1,4 @@
+from collections import deque
 import numpy as np
 import torch
 import torch.nn as nn
@@ -84,6 +85,29 @@ class Critic(nn.Module):
         x = torch.cat([state, action_onehot], dim=-1)
         return self.net(x)
 
+# Make a queue based buffer using deque
+
+
+class Buffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = deque(maxlen=capacity)
+        self.actions = deque(maxlen=capacity)
+        self.next_states = deque(maxlen=capacity)
+        self.log_probs = deque(maxlen=capacity)
+    def push(self, state, action, reward, next_state, done, log_prob):
+        self.buffer.append((state, action, reward, next_state, done, log_prob))
+        self.actions.append(action)
+        self.next_states.append(next_state)
+        self.log_probs.append(log_prob)
+    def sample(self, batch_size):
+        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        batch = [self.buffer[idx] for idx in indices]
+        state, action, reward, next_state, done, log_prob = map(np.stack, zip(*batch))
+        return state, action, reward, next_state, done, log_prob
+
+    def __len__(self):
+        return len(self.buffer)
 
 # ===================================================
 # 3. Helper Functions
@@ -154,6 +178,7 @@ def train_actor_critic(envs, actor, critic, iterations=3000, gamma=0.99):
             print(f"[Train] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
 
 
+
 def unlearn_environment(envs, actor, critic, unlearn_idx, iterations=2000, gamma=0.99):
     """Fine-tune to unlearn a specific environment."""
     device = next(actor.parameters()).device
@@ -200,10 +225,73 @@ def unlearn_environment(envs, actor, critic, unlearn_idx, iterations=2000, gamma
         if (it + 1) % 100 == 0:
             print(f"[Unlearn] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
 
+def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_estimator, iterations=2000, gamma=0.99):
+    """Fine-tune to unlearn a specific environment."""
+    device = next(actor.parameters()).device
+    opt_actor = optim.Adam(actor.parameters(), lr=1e-3)
+    opt_critic = optim.Adam(critic.parameters(), lr=1e-3)
 
-# ===================================================
+    for it in range(iterations):
+        total_reward = 0.0
+        for i, env in enumerate(envs):
+            state, _ = env.reset()
+            done = False
+            while not done:
+                s = one_hot_state(state, env.n_states).to(device)
+                action, log_prob = select_action(actor, s)
+                next_state, reward, done, _, _ = env.step(action)
+
+                ns = one_hot_state(next_state, env.n_states).to(device)
+                a_onehot = one_hot_action(action, env.n_actions).to(device)
+
+                with torch.no_grad():
+                    next_action, _ = select_action(actor, ns)
+                    next_a_onehot = one_hot_action(next_action, env.n_actions).to(device)
+                    q_next = critic(ns, next_a_onehot)
+                q_value = critic(s, a_onehot)
+
+                td_target = torch.tensor(reward, device=device) + gamma * q_next * (1 - int(done))
+                td_error = td_target - q_value
+
+                opt_critic.zero_grad()
+                td_error.pow(2).mean().backward()
+                opt_critic.step()
+
+                opt_actor.zero_grad()
+                q_val = critic(s, a_onehot).detach()
+                actor_loss = -log_prob * q_val
+                if i == unlearn_idx:
+                    buffer.push(s.cpu().numpy(), action, reward, ns.cpu().numpy(), done, log_prob.item())
+                    if len(buffer) == buffer.capacity:
+
+                        actions_buf = torch.tensor(np.array(buffer.actions), dtype=torch.int64).unsqueeze(-1).to(device)
+                        next_states_buf = torch.tensor(np.array(buffer.next_states)[:,0].tolist(), dtype=torch.float32).to(device)
+                        log_probs_buf = torch.tensor(np.array(buffer.log_probs), dtype=torch.float32).to(device)
+
+                        mi_grad_estimator.learning_loss(
+                            actions_buf,
+                            next_states_buf
+                        ).backward()
+                        
+                        mi_loss = mi_grad_estimator.forward(
+                            actions_buf,
+                            next_states_buf,
+                            log_probs_buf
+                        )
+                        actor_loss = mi_loss  # MI loss is actor loss
+                actor_loss.backward()
+                opt_actor.step()
+
+                total_reward += reward
+                state = next_state
+
+        if (it + 1) % 100 == 0:
+            print(f"[Unlearn] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
+
+
+# ====================================
 # 5. Approximation and Comparison
-# ===================================================
+# ====================================
 
 def approximate_env(env, actor, n_samples=5000):
     """Approximate P_hat(s'|s,a) and R_hat(s,a) using policy rollouts."""
