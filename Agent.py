@@ -72,17 +72,17 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, state_dim, action_dim):
+    """Value function approximator V(s)."""
+    def __init__(self, state_dim, hidden_dim=64):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim + action_dim, 64),
+            nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(hidden_dim, 1)
         )
 
-    def forward(self, state, action_onehot):
-        x = torch.cat([state, action_onehot], dim=-1)
-        return self.net(x)
+    def forward(self, state):
+        return self.net(state)
 
 
 # ===================================================
@@ -127,23 +127,21 @@ def train_actor_critic(envs, actor, critic, iterations=3000, gamma=0.99):
                 next_state, reward, done, _, _ = env.step(action)
 
                 ns = one_hot_state(next_state, env.n_states).to(device)
-                a_onehot = one_hot_action(action, env.n_actions).to(device)
-
                 with torch.no_grad():
-                    next_action, _ = select_action(actor, ns)
-                    next_a_onehot = one_hot_action(next_action, env.n_actions).to(device)
-                    q_next = critic(ns, next_a_onehot)
-                q_value = critic(s, a_onehot)
+                    v_next = critic(ns)
+                v_s = critic(s)
 
-                td_target = torch.tensor(reward, device=device) + gamma * q_next * (1 - int(done))
-                td_error = td_target - q_value
+                td_target = torch.tensor(reward, device=device) + gamma * v_next * (1 - int(done))
+                advantage = td_target - v_s
 
+                # Critic update
                 opt_critic.zero_grad()
-                td_error.pow(2).mean().backward()
+                advantage.pow(2).mean().backward()
                 opt_critic.step()
 
+                # Actor update (policy gradient with advantage)
                 opt_actor.zero_grad()
-                actor_loss = -log_prob * q_value.detach()
+                actor_loss = -log_prob * advantage.detach()
                 actor_loss.backward()
                 opt_actor.step()
 
@@ -171,26 +169,23 @@ def unlearn_environment(envs, actor, critic, unlearn_idx, iterations=2000, gamma
                 next_state, reward, done, _, _ = env.step(action)
 
                 ns = one_hot_state(next_state, env.n_states).to(device)
-                a_onehot = one_hot_action(action, env.n_actions).to(device)
-
                 with torch.no_grad():
-                    next_action, _ = select_action(actor, ns)
-                    next_a_onehot = one_hot_action(next_action, env.n_actions).to(device)
-                    q_next = critic(ns, next_a_onehot)
-                q_value = critic(s, a_onehot)
+                    v_next = critic(ns)
+                v_s = critic(s)
 
-                td_target = torch.tensor(reward, device=device) + gamma * q_next * (1 - int(done))
-                td_error = td_target - q_value
+                td_target = torch.tensor(reward, device=device) + gamma * v_next * (1 - int(done))
+                advantage = td_target - v_s
 
+                # Critic update
                 opt_critic.zero_grad()
-                td_error.pow(2).mean().backward()
+                advantage.pow(2).mean().backward()
                 opt_critic.step()
 
+                # Actor update with advantage; reverse for unlearning target env
                 opt_actor.zero_grad()
-                q_val = critic(s, a_onehot).detach()
-                actor_loss = -log_prob * q_val
+                actor_loss = -log_prob * advantage.detach()
                 if i == unlearn_idx:
-                    actor_loss = -actor_loss  # reverse gradient
+                    actor_loss = -actor_loss
                 actor_loss.backward()
                 opt_actor.step()
 
