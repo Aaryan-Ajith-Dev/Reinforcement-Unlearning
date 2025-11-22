@@ -1,0 +1,42 @@
+[
+    {
+        "rows": 4,
+        "cols": 4,
+        "map": [
+            "SFFF",
+            "FHFH",
+            "FFFH",
+            "HFFG"
+        ]
+    },
+    {
+        "rows": 4,
+        "cols": 4,
+        "map": [
+            "SFFF",
+            "FFFH",
+            "HFHF",
+            "HFFG"
+        ]
+    },
+    {
+        "rows": 4,
+        "cols": 4,
+        "map": [
+            "SFFF",
+            "FHHF",
+            "FFFH",
+            "HFFG"
+        ]
+    },
+    {
+        "rows": 4,
+        "cols": 4,
+        "map": [
+            "SFFF",
+            "FHFH",
+            "FFFH",
+            "HFGG"
+        ]
+    }
+]
