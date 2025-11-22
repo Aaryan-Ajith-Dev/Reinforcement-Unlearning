@@ -237,43 +237,43 @@ def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_est
                 next_state, reward, done, _, _ = env.step(action)
 
                 ns = one_hot_state(next_state, env.n_states).to(device)
-                a_onehot = one_hot_action(action, env.n_actions).to(device)
-
+                # Value-based TD target and advantage
                 with torch.no_grad():
-                    next_action, _ = select_action(actor, ns)
-                    next_a_onehot = one_hot_action(next_action, env.n_actions).to(device)
-                    q_next = critic(ns, next_a_onehot)
-                q_value = critic(s, a_onehot)
+                    v_next = critic(ns)
+                v_s = critic(s)
+                td_target = torch.tensor(reward, device=device) + gamma * v_next * (1 - int(done))
+                advantage = td_target - v_s
 
-                td_target = torch.tensor(reward, device=device) + gamma * q_next * (1 - int(done))
-                td_error = td_target - q_value
-
+                # Critic update
                 opt_critic.zero_grad()
-                td_error.pow(2).mean().backward()
+                advantage.pow(2).mean().backward()
                 opt_critic.step()
 
+                # Actor update
                 opt_actor.zero_grad()
-                q_val = critic(s, a_onehot).detach()
-                actor_loss = -log_prob * q_val
+                actor_loss = -log_prob * advantage.detach()
                 if i == unlearn_idx:
+                    # Populate buffer for MI-based unlearning
                     buffer.push(s.cpu().numpy(), action, reward, ns.cpu().numpy(), done, log_prob.item())
                     if len(buffer) == buffer.capacity:
-
                         actions_buf = torch.tensor(np.array(buffer.actions), dtype=torch.int64).unsqueeze(-1).to(device)
-                        next_states_buf = torch.tensor(np.array(buffer.next_states)[:,0].tolist(), dtype=torch.float32).to(device)
+                        # Use full next-state vectors
+                        next_states_buf = torch.tensor(np.array(buffer.next_states), dtype=torch.float32).to(device)
                         log_probs_buf = torch.tensor(np.array(buffer.log_probs), dtype=torch.float32).to(device)
 
+                        # MI gradient estimator first backward pass
                         mi_grad_estimator.learning_loss(
                             actions_buf,
                             next_states_buf
                         ).backward()
-                        
+
+                        # Replace actor loss with MI loss (overrides policy gradient)
                         mi_loss = mi_grad_estimator.forward(
                             actions_buf,
                             next_states_buf,
                             log_probs_buf
                         )
-                        actor_loss = mi_loss  # MI loss is actor loss
+                        actor_loss = mi_loss
                 actor_loss.backward()
                 opt_actor.step()
 
