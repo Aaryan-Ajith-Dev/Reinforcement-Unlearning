@@ -172,8 +172,8 @@ def train_actor_critic(envs, actor, critic, iterations=3000, gamma=0.99):
                 total_reward += reward
                 state = next_state
 
-        if (it + 1) % 100 == 0:
-            print(f"[Train] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
+        # if (it + 1) % 100 == 0:
+        print(f"[Train] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
 
 
 
@@ -217,8 +217,8 @@ def unlearn_environment(envs, actor, critic, unlearn_idx, iterations=2000, gamma
                 total_reward += reward
                 state = next_state
 
-        if (it + 1) % 100 == 0:
-            print(f"[Unlearn] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
+        # if (it + 1) % 100 == 0:
+        print(f"[Unlearn] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
 
 def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_estimator, iterations=2000, gamma=0.99):
     """Fine-tune to unlearn a specific environment."""
@@ -280,8 +280,8 @@ def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_est
                 total_reward += reward
                 state = next_state
 
-        if (it + 1) % 100 == 0:
-            print(f"[Unlearn] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
+        # if (it + 1) % 100 == 0:
+        print(f"[Unlearn] Iter {it+1}/{iterations} | Total reward: {total_reward:.2f}")
 
 
 # ====================================
@@ -361,9 +361,9 @@ if __name__ == "__main__":
     print(f"\n=== Phase 2: Unlearning Environment {unlearn_idx} ===")
     unlearn_environment(envs, actor, critic, unlearn_idx=unlearn_idx, iterations=1500)
 
-    print("\n=== Phase 3: Reconstruction and Comparison ===")
-    P_true = envs[unlearn_idx].get_true_transition()
-    R_true = envs[unlearn_idx].get_true_reward()
-    P_hat, R_hat = approximate_env(envs[unlearn_idx], actor, n_samples=3000)
-    compare_envs(P_true, R_true, P_hat, R_hat)
+    # print("\n=== Phase 3: Reconstruction and Comparison ===")
+    # P_true = envs[unlearn_idx].get_true_transition()
+    # R_true = envs[unlearn_idx].get_true_reward()
+    # P_hat, R_hat = approximate_env(envs[unlearn_idx], actor, n_samples=3000)
+    # compare_envs(P_true, R_true, P_hat, R_hat)
     print("\nExperiment complete.")
