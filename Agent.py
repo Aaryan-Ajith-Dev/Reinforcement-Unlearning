@@ -129,6 +129,54 @@ def select_action(actor, state):
     action = dist.sample()
     return action.item(), dist.log_prob(action)
 
+def estimate_mutual_information(env, actor, n_samples=5000):
+    """
+    Estimates I(S'; A | S) using empirical counts.
+    """
+    device = next(actor.parameters()).device
+    n_states, n_actions = env.n_states, env.n_actions
+
+    # Count tables
+    joint_counts = np.zeros((n_states, n_actions, n_states))  # p(a, s' | s)
+    state_counts = np.zeros(n_states)
+
+    for _ in range(n_samples):
+        s, _ = env.reset()
+        s_vec = one_hot_state(s, n_states).to(device)
+
+        with torch.no_grad():
+            probs = actor(s_vec)
+        dist = torch.distributions.Categorical(probs)
+        a = dist.sample().item()
+
+        s_next, _, _, _, _ = env.step(a)
+
+        joint_counts[s, a, s_next] += 1
+        state_counts[s] += 1
+
+    mi_total = 0.0
+    valid_states = 0
+
+    for s in range(n_states):
+        if state_counts[s] == 0:
+            continue
+
+        # Normalize
+        p_a_sprime = joint_counts[s] / joint_counts[s].sum()
+        p_a = p_a_sprime.sum(axis=1, keepdims=True)
+        p_sprime = p_a_sprime.sum(axis=0, keepdims=True)
+
+        mi_s = 0.0
+        for a in range(n_actions):
+            for sp in range(n_states):
+                p = p_a_sprime[a, sp]
+                if p > 0 and p_a[a, 0] > 0 and p_sprime[0, sp] > 0:
+                    mi_s += p * np.log(p / (p_a[a, 0] * p_sprime[0, sp]))
+
+        mi_total += mi_s
+        valid_states += 1
+
+    return mi_total / max(valid_states, 1)
 
 # ===================================================
 # 4. Training Functions
