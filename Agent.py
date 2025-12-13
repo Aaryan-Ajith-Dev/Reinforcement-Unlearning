@@ -6,7 +6,7 @@ import torch.optim as optim
 import gymnasium as gym
 from gymnasium import spaces
 from scipy.stats import entropy
-
+from mi_grad_estimator import MIGradEstimator
 
 # ===================================================
 # 1. Custom FrozenLake-like Gymnasium Environment
@@ -304,7 +304,7 @@ def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_est
                     # Populate buffer for MI-based unlearning
                     buffer.push(s.cpu().numpy(), action, reward, ns.cpu().numpy(), done, log_prob.item())
                     if len(buffer) == buffer.capacity:
-                        actions_buf = torch.tensor(np.array(buffer.actions), dtype=torch.int64).unsqueeze(-1).to(device)
+                        actions_buf = torch.tensor(np.array(buffer.actions), dtype=torch.float32).unsqueeze(-1).to(device)
                         # Use full next-state vectors
                         next_states_buf = torch.tensor(np.array(buffer.next_states), dtype=torch.float32).to(device)
                         log_probs_buf = torch.tensor(np.array(buffer.log_probs), dtype=torch.float32).to(device)
@@ -333,7 +333,66 @@ def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_est
 
 
 # ====================================
-# 5. Approximation and Comparison
+# 5. Model Save/Load Utilities
+# ====================================
+
+def save_models(actor, critic, filepath="trained_policy.pt"):
+    """Save actor and critic state dicts to a file."""
+    torch.save({
+        'actor_state_dict': actor.state_dict(),
+        'critic_state_dict': critic.state_dict()
+    }, filepath)
+    print(f"Models saved to {filepath}")
+
+def load_models(actor, critic, filepath="trained_policy.pt", device=None):
+    """Load actor and critic state dicts from a file."""
+    if device is None:
+        device = next(actor.parameters()).device
+    checkpoint = torch.load(filepath, map_location=device)
+    actor.load_state_dict(checkpoint['actor_state_dict'])
+    critic.load_state_dict(checkpoint['critic_state_dict'])
+    print(f"Models loaded from {filepath}")
+
+def compute_policy_kl_divergence(actor1, actor2, n_states, n_samples=1000):
+    """
+    Compute KL divergence between two policies: KL(actor1 || actor2).
+    
+    Args:
+        actor1: First policy (e.g., trained policy)
+        actor2: Second policy (e.g., unlearned policy)
+        n_states: Number of states in the environment
+        n_samples: Number of state samples to average over
+        
+    Returns:
+        mean_kl: Average KL divergence across sampled states
+        state_kls: KL divergence for each state
+    """
+    device = next(actor1.parameters()).device
+    actor1.eval()
+    actor2.eval()
+    
+    state_kls = []
+    
+    with torch.no_grad():
+        for state_idx in range(n_states):
+            # Create one-hot encoded state
+            state = one_hot_state(state_idx, n_states).to(device)
+            
+            # Get action probabilities from both policies
+            probs1 = actor1(state)
+            probs2 = actor2(state)
+            
+            # Compute KL divergence: KL(P1 || P2) = sum(P1 * log(P1/P2))
+            # Add small epsilon to avoid log(0)
+            eps = 1e-8
+            kl = torch.sum(probs1 * (torch.log(probs1 + eps) - torch.log(probs2 + eps)))
+            state_kls.append(kl.item())
+    
+    mean_kl = np.mean(state_kls)
+    return mean_kl, np.array(state_kls)
+
+# ====================================
+# 6. Approximation and Comparison
 # ====================================
 
 def approximate_env(env, actor, n_samples=5000):
@@ -384,7 +443,7 @@ def compare_envs(true_P, true_R, P_hat, R_hat):
 
 
 # ===================================================
-# 6. Run Full Experiment
+# 7. Run Full Experiment
 # ===================================================
 
 if __name__ == "__main__":
@@ -402,16 +461,55 @@ if __name__ == "__main__":
     actor = Actor(n_states, n_actions).to(device)
     critic = Critic(n_states, n_actions).to(device)
 
-    print("\n=== Phase 1: Joint Training ===")
-    train_actor_critic(envs, actor, critic, iterations=2000)
+    unlearn_idx = 2  # Index of environment to unlearn
+    
+    # ===== Phase 1: Joint Training =====
+    # print("\n=== Phase 1: Joint Training ===")
+    # train_actor_critic(envs, actor, critic, iterations=2000)
+    # mi_train = estimate_mutual_information(envs[unlearn_idx], actor)
+    # print(f"I(S';A|S) = {mi_train:.6f}")
+    
+    # # Save the trained policy
+    # save_models(actor, critic, "trained_policy.pt")
 
-    unlearn_idx = 2
-    print(f"\n=== Phase 2: Unlearning Environment {unlearn_idx} ===")
-    unlearn_environment(envs, actor, critic, unlearn_idx=unlearn_idx, iterations=1500)
+    # ===== Phase 2: Standard Gradient Reversal Unlearning =====
+    # print(f"\n=== Phase 2: Standard Unlearning Environment {unlearn_idx} ===")
+    # # Create fresh models and load trained weights
+    # actor_std = Actor(n_states, n_actions).to(device)
+    # critic_std = Critic(n_states, n_actions).to(device)
+    # load_models(actor_std, critic_std, "trained_policy.pt", device)
+    
+    # unlearn_environment(envs, actor_std, critic_std, unlearn_idx=unlearn_idx, iterations=1500)
+    # mi_unlearn = estimate_mutual_information(envs[unlearn_idx], actor_std)
+    # print(f"I(S';A|S) after standard unlearning = {mi_unlearn:.6f}")
 
-    # print("\n=== Phase 3: Reconstruction and Comparison ===")
+    # ===== Phase 3: MI-based Unlearning =====
+    print(f"\n=== Phase 3: MI-based Unlearning Environment {unlearn_idx} ===")
+    # Create fresh models and load trained weights again
+    actor_mi = Actor(n_states, n_actions).to(device)
+    critic_mi = Critic(n_states, n_actions).to(device)
+    load_models(actor_mi, critic_mi, "trained_policy.pt", device)
+    
+    buffer_capacity = 5000
+    buffer = Buffer(capacity=buffer_capacity)
+    mi_grad_estimator = MIGradEstimator(
+        x_dim=1,  # Action dimension
+        y_dim=n_states,  # Next state dimension
+        hidden_size=64
+    ).to(device)
+    unlearn_environment_mi(envs, actor_mi, critic_mi, unlearn_idx=unlearn_idx, buffer=buffer, mi_grad_estimator=mi_grad_estimator, iterations=1500)
+    mi_unlearn_mi = estimate_mutual_information(envs[unlearn_idx], actor_mi)
+    print(f"I(S';A|S) after MI-based unlearning = {mi_unlearn_mi:.6f}")
+    
+    # ===== Optional: Reconstruction and Comparison =====
+    # print("\n=== Phase 4: Reconstruction and Comparison ===")
     # P_true = envs[unlearn_idx].get_true_transition()
     # R_true = envs[unlearn_idx].get_true_reward()
-    # P_hat, R_hat = approximate_env(envs[unlearn_idx], actor, n_samples=3000)
-    # compare_envs(P_true, R_true, P_hat, R_hat)
+    # P_hat_std, R_hat_std = approximate_env(envs[unlearn_idx], actor_std, n_samples=3000)
+    # P_hat_mi, R_hat_mi = approximate_env(envs[unlearn_idx], actor_mi, n_samples=3000)
+    # print("\nStandard Unlearning:")
+    # compare_envs(P_true, R_true, P_hat_std, R_hat_std)
+    # print("\nMI-based Unlearning:")
+    # compare_envs(P_true, R_true, P_hat_mi, R_hat_mi)
+    
     print("\nExperiment complete.")
