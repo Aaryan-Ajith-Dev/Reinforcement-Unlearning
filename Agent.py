@@ -466,6 +466,8 @@ def exact_mutual_information(env, actor):
 
 
 if __name__ == "__main__":
+    import copy
+
     n_envs = 1
     n_states, n_actions = 16, 4
     stochasticities = np.linspace(0.1, 0.5, n_envs)
@@ -481,36 +483,41 @@ if __name__ == "__main__":
     critic = Critic(n_states, n_actions).to(device)
 
     print("\n=== Phase 1: Joint Training ===")
-    # train_actor_critic(envs, actor, critic, iterations=200)
+    train_actor_critic(envs, actor, critic, iterations=200)
 
-    # # save checkpoint 
-    # torch.save({
-    #     'actor_state_dict': actor.state_dict(),
-    #     'critic_state_dict': critic.state_dict(),
-    # }, 'joint_trained_checkpoint.pth')
+    # save checkpoint 
+    torch.save({
+        'actor_state_dict': actor.state_dict(),
+        'critic_state_dict': critic.state_dict(),
+    }, 'joint_trained_checkpoint.pth')
     mi_value = exact_mutual_information(envs[0], actor)
     print(f"Exact I(S'; A | S) after joint training: {mi_value:.6f}")
 
     unlearn_idx = 0
-    # print(f"\n=== Phase 2: Unlearning Environment {unlearn_idx} ===")
+    print(f"\n=== Phase 2: Unlearning Environment {unlearn_idx} ===")
 
-    # unlearn_environment(envs, actor, critic, unlearn_idx=unlearn_idx, iterations=500)
-    # mi_value = exact_mutual_information(envs[unlearn_idx], actor)
-    # print(f"Exact I(S'; A | S) after unlearning: {mi_value:.6f}")
+    unlearn_actor = copy.deepcopy(actor)
+    unlearn_critic = copy.deepcopy(critic)
+    unlearn_environment(envs, unlearn_actor, unlearn_critic, unlearn_idx=unlearn_idx, iterations=1500)
+    mi_value = exact_mutual_information(envs[unlearn_idx], unlearn_actor)
+    print(f"Exact I(S'; A | S) after unlearning: {mi_value:.6f}")
 
     print("\n=== Unlearning Via MI minimisation ===")
+
+    mi_unlearn_actor = copy.deepcopy(actor)
+    mi_unlearn_critic = copy.deepcopy(critic)
     unlearn_environment_mi(
-        envs, actor, critic, unlearn_idx=unlearn_idx,
+        envs, mi_unlearn_actor, mi_unlearn_critic, unlearn_idx=unlearn_idx,
         buffer=Buffer(capacity=64),
         mi_grad_estimator=MIGradEstimatorDiscrete(
             x_dim=n_actions + n_states,
             y_dim=n_states,
             hidden_size=128
         ).to(device),
-        iterations=500
+        iterations=1500
     )
     print("\n=== Exact Mutual Information After Unlearning ===")
-    mi_value = exact_mutual_information(envs[unlearn_idx], actor)
+    mi_value = exact_mutual_information(envs[unlearn_idx], mi_unlearn_actor)
     print(f"Exact I(S'; A | S) after unlearning: {mi_value:.6f}")
 
     # print("\n=== Phase 3: Reconstruction and Comparison ===")
