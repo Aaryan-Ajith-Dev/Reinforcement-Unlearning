@@ -3,6 +3,46 @@ import math
 
 import torch 
 import torch.nn as nn
+import torch.nn.functional as F
+
+class DiscreteCLUB(nn.Module):
+    """
+    CLUB variant for discrete X and discrete Y (both one-hot encoded).
+    Uses cross-entropy between predicted q(y|x) and true y.
+    """
+    def __init__(self, x_dim, y_dim, hidden_size):
+        super().__init__()
+        self.q_y_given_x = nn.Sequential(
+            nn.Linear(x_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, y_dim)
+        )
+
+    def forward(self, x_samples, y_samples):
+        # logits for q(y|x)
+        logits = self.q_y_given_x(x_samples)               # [N, y_dim]
+        log_probs_pos = F.log_softmax(logits, dim=-1)
+
+        # Positive term: log q(y|x) for true pair
+        positive = (log_probs_pos * y_samples).sum(dim=-1)  # [N]
+
+        # Negative term: expectation over mismatched pairs
+        # (Monte Carlo via all y_samples as negatives)
+        log_probs_neg = torch.matmul(F.log_softmax(logits, dim=-1),
+                                     y_samples.T) / y_samples.shape[0]
+        negative = log_probs_neg.mean(dim=-1)
+
+        # MI estimate (upper bound)
+        mi_est = (positive - negative).mean()
+        return mi_est
+
+    def learning_loss(self, x_samples, y_samples):
+        """Train q(y|x) by maximizing log q(y|x) for true pairs."""
+        logits = self.q_y_given_x(x_samples)
+        # Cross entropy between predicted and true one-hot targets
+        ce = -(F.log_softmax(logits, dim=-1) * y_samples).sum(dim=-1).mean()
+        return ce
+
 
 class CLUBForCategorical(nn.Module): # Update 04/27/2022
     '''
