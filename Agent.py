@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from mi_grad_estimator import MIGradEstimator, MIGradEstimatorDiscrete
 import torch.optim as optim
+import torch.nn.functional as F
 
 # ===================================================
 # 1. Custom FrozenLake-like Gymnasium Environment
@@ -268,8 +269,6 @@ def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_est
         for i, env in enumerate(envs):
             state, _ = env.reset()
             done = False
-            # === inside your main loop: replace the while-not-done body with the block below ===
-            beta = 0.1                             # scale of MI regularizer (tune: 0.01 - 0.5)
             # make sure opt_mi is defined (optimizer for mi_grad_estimator)
 
             while not done:
@@ -300,70 +299,60 @@ def unlearn_environment_mi(envs, actor, critic, unlearn_idx, buffer, mi_grad_est
 
                 # If this is the unlearn environment, collect data & apply MI-based update
                 if i == unlearn_idx:
-                    # store plaintext state/action/... (no grads)
-                    buffer.push(s.cpu().numpy(), action, reward, ns.cpu().numpy(), done)
+                    # store raw indices (not one-hot) in buffer
+                    buffer.push(
+                        state,       # int state index
+                        action,      # int action index
+                        reward,
+                        next_state,  # int next-state index
+                        done
+                    )
 
                     if len(buffer) == buffer.capacity:
-                        states_np = np.array(buffer.states)            # (N,)
-                        actions_np = np.array(buffer.actions)          # (N,)
+                        # --- build tensors ---
+                        states_tensor = torch.tensor(buffer.states, dtype=torch.long, device=device)      # (N,)
+                        actions_tensor = torch.tensor(buffer.actions, dtype=torch.long, device=device)    # (N,)
+                        next_states_tensor = torch.tensor(buffer.next_states, dtype=torch.long, device=device)  # (N,)
 
-                        states_tensor = torch.tensor(states_np, dtype=torch.long, device=device)
-                        actions_tensor = torch.tensor(actions_np, dtype=torch.long, device=device)
+                        # --- one-hot encodings ---
+                        states_onehot = F.one_hot(states_tensor, num_classes=n_states).float()          # (N, n_states)
+                        actions_onehot = F.one_hot(actions_tensor, num_classes=n_actions).float()       # (N, n_actions)
+                        sa_embed = torch.cat([states_onehot, actions_onehot], dim=-1)                  # (N, n_states + n_actions)
 
-                        states_onehot = torch.nn.functional.one_hot(
-                            states_tensor, num_classes=n_states
-                        ).float()                                      # (N, n_states)
+                        next_states_onehot = F.one_hot(next_states_tensor, num_classes=n_states).float()  # (N, n_states)
 
-                        actions_onehot = torch.nn.functional.one_hot(
-                            actions_tensor, num_classes=n_actions
-                        ).float()                                      # (N, n_actions)
-
-                        sa_onehot = torch.cat([states_onehot, actions_onehot], dim=-1)
-                        # shape: (N, n_states + n_actions)
-
-                        next_states_np = np.stack(buffer.next_states)              # (N, n_states)
-                        next_states_buf = torch.tensor(next_states_np, dtype=torch.float32, device=device)
-
-                        states_np = np.stack(buffer.states)                        # (N, n_states)
-                        states_buf = torch.tensor(states_np, dtype=torch.float32, device=device)
-
-                        # Recompute log_probs from current actor so gradients flow to actor
+                        # --- recompute log_probs for actor gradient ---
                         with torch.enable_grad():
-                            probs = actor(states_buf)      # (N, n_actions) - must be a valid prob or logits per your actor
+                            probs = actor(states_onehot)  # or use states_tensor if actor expects indices
                             dist = torch.distributions.Categorical(probs)
-                            log_probs_buf = dist.log_prob(actions_tensor)  # (N,) - connected to actor graph
+                            log_probs_buf = dist.log_prob(actions_tensor)  # (N,) connected to actor
 
-                        # ---- Train MI estimator (detached data) ----
-                        # Ensure MI estimator params require grad for its own training
+                        # --- Train MI estimator (detached data) ---
                         for p in mi_grad_estimator.parameters():
                             p.requires_grad = True
-
+                        
                         for _ in range(mi_train_steps):
                             opt_mi.zero_grad()
-                            # detach inputs: we do NOT want any gradient to flow back to actor here
-                            mi_est_loss = mi_grad_estimator.learning_loss(sa_onehot.detach(), next_states_buf.detach())
+                            mi_est_loss = mi_grad_estimator.learning_loss(sa_embed.detach(), next_states_onehot.detach())
                             mi_est_loss.backward()
                             opt_mi.step()
 
-                        # ---- Compute MI loss for actor update (freeze MI params during this actor step) ----
-                        mi_prev_requires = [p.requires_grad for p in mi_grad_estimator.parameters()]
-                        # freeze MI estimator so autograd won't accumulate grads for its params
+                        # --- Compute actor MI loss ---
                         for p in mi_grad_estimator.parameters():
                             p.requires_grad = False
-
-                        # forward pass: pass detached x,y for predictor inputs but live log_probs for gradient flow to actor
                         mi_weighted_loss, mi = mi_grad_estimator.forward(
-                            sa_onehot.detach(),    # predictor inputs detached (predictor is frozen now)
-                            next_states_buf.detach(),
-                            log_probs_buf               # this is connected to actor -> gives actor gradient
+                            sa_embed.detach(),
+                            next_states_onehot.detach(),
+                            log_probs_buf
                         )
 
-                        # combine actor losses (keep the original PG term + beta * MI)
+                        # override actor loss
                         actor_loss = mi_weighted_loss
 
-                        # restore MI params' requires_grad
-                        for p, prev in zip(mi_grad_estimator.parameters(), mi_prev_requires):
-                            p.requires_grad = prev
+                        # restore MI params
+                        for p in mi_grad_estimator.parameters():
+                            p.requires_grad = True
+
 
                 # Backprop actor and step (single place)
                 opt_actor.zero_grad()
@@ -492,22 +481,22 @@ if __name__ == "__main__":
     critic = Critic(n_states, n_actions).to(device)
 
     print("\n=== Phase 1: Joint Training ===")
-    train_actor_critic(envs, actor, critic, iterations=200)
+    # train_actor_critic(envs, actor, critic, iterations=200)
 
-    # save checkpoint 
-    torch.save({
-        'actor_state_dict': actor.state_dict(),
-        'critic_state_dict': critic.state_dict(),
-    }, 'joint_trained_checkpoint.pth')
+    # # save checkpoint 
+    # torch.save({
+    #     'actor_state_dict': actor.state_dict(),
+    #     'critic_state_dict': critic.state_dict(),
+    # }, 'joint_trained_checkpoint.pth')
     mi_value = exact_mutual_information(envs[0], actor)
     print(f"Exact I(S'; A | S) after joint training: {mi_value:.6f}")
 
     unlearn_idx = 0
-    print(f"\n=== Phase 2: Unlearning Environment {unlearn_idx} ===")
+    # print(f"\n=== Phase 2: Unlearning Environment {unlearn_idx} ===")
 
-    unlearn_environment(envs, actor, critic, unlearn_idx=unlearn_idx, iterations=500)
-    mi_value = exact_mutual_information(envs[unlearn_idx], actor)
-    print(f"Exact I(S'; A | S) after unlearning: {mi_value:.6f}")
+    # unlearn_environment(envs, actor, critic, unlearn_idx=unlearn_idx, iterations=500)
+    # mi_value = exact_mutual_information(envs[unlearn_idx], actor)
+    # print(f"Exact I(S'; A | S) after unlearning: {mi_value:.6f}")
 
     print("\n=== Unlearning Via MI minimisation ===")
     unlearn_environment_mi(
